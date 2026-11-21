@@ -30,3 +30,10 @@ backend/.env.*
 *.njsproj
 *.sln
 *.sw?
+
+# Uploaded files
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Raw n8n exports (sanitize before committing)
+n8n/raw/

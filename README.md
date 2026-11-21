@@ -1,52 +1,81 @@
-# Cincinnati Hotel AI Concierge
+# Hospitality AI Suite
 
-A proof-of-concept guest support assistant that connects a React chat interface to an Express API and n8n workflows. It uses a hotel's PDF guide as context and routes questions that need follow-up to an escalation workflow.
+An AI front desk for hotels, built almost entirely in **n8n**. Guests chat with an assistant that answers from the hotel's own knowledge base (RAG). When it doesn't know something, it says so, emails the hotel team, and saves the guest and the full conversation for follow-up.
 
-[Open the AI Studio project](https://ai.studio/apps/drive/1AlF4B9roOXVCqpvydEF6UST6VTYZDJgG)
+No custom AI backend logic: the intelligence lives in three n8n workflows backed by Supabase (Postgres + pgvector) and Google Gemini.
 
-## What it does
+## How it works
 
-- Lets guests ask common questions through a chat interface with suggested prompts.
-- Lets staff upload a hotel guide PDF. The backend extracts its text and includes it as context in requests sent to n8n.
-- Tracks sessions, question topics, unanswered requests, and recent activity in an admin dashboard.
-- Sends guest follow-up details to a separate n8n escalation webhook.
+```
+Guest (React chat UI)
+      |
+      v
+Express backend (thin proxy, keeps n8n URLs private)
+      |
+      +--> n8n  hotel-chat              AI Agent + Gemini + vector search + session memory
+      |                                 logs every turn -> hotel_chat_logs
+      |
+      +--> n8n  hotel-escalate          emails hotel staff, upserts guest, saves transcript
+      |                                 -> hotel_guests, hotel_escalations
+      |
+      +--> n8n  hotel-knowledge-ingest  text -> chunks -> Gemini embeddings -> pgvector
+                                        -> hotel_knowledge_documents
+```
 
-## Architecture
+| Workflow | Webhook | What it does |
+|---|---|---|
+| `hotel-chat` | `POST /webhook/hotel-chat` | Retrieves facts from the knowledge base, answers in plain text, returns `{ answer, topic, canAnswer }`. Never invents "we don't have X"; unknown means escalate. |
+| `hotel-escalate` | `POST /webhook/hotel-escalate` | Sends an email with the question and transcript, creates or updates the guest by email, stores the escalation. |
+| `hotel-knowledge-ingest` | `POST /webhook/hotel-knowledge-ingest` | Splits text into 800-character chunks (100 overlap), embeds with `gemini-embedding-001`, stores in Supabase. |
 
-- **Frontend:** React, TypeScript, and Vite
-- **Backend:** Node.js and Express
-- **Document handling:** Multer and PDF text extraction
-- **Automation:** n8n webhooks for answering and escalating questions
+## Stack
 
-The n8n workflows are external to this repository. The backend keeps the uploaded PDF text and session metrics in memory, so they reset when the service restarts.
+n8n, Google Gemini (chat + embeddings), Supabase (Postgres, pgvector, RLS), Node.js/Express, React + Vite.
 
-## Run locally
+## Repo layout
 
-You need Node.js and access to the n8n workflows used by the app.
+```
+n8n/                 importable workflow JSON (credentials stripped)
+supabase/migrations/ database schema (tables, vector search function, RLS)
+backend/             Express proxy between the UI and n8n
+frontend/, src/      React chat UI
+docs/sample-data/    sample hotel guide PDF to try the knowledge base with
+```
 
-1. Start the backend:
+## Setup
 
+1. **Supabase**: create a project, then run `supabase/migrations/001_hotel_ai_suite_schema.sql` in the SQL editor.
+2. **n8n**: import the three files in `n8n/`. Create credentials and attach them: a *Supabase API* credential (project URL + service role key), a *Google Gemini (PaLM)* credential, and a *Gmail OAuth2* credential. Set `ESCALATION_RECIPIENT` in the *Build Escalation Email* node. Publish the workflows.
+3. **Load the knowledge base**: send your hotel's text to the ingest webhook, for example:
+   ```bash
+   curl -X POST "$N8N_INGEST_URL" -H "Content-Type: application/json" \
+     -d '{"title":"Hotel guide","source":"guide.pdf","text":"Check-in is 3 PM..."}'
+   ```
+4. **Backend**:
    ```bash
    cd backend
+   cp .env.example .env   # fill in your n8n webhook URLs
    npm install
-   cp .env.example .env
-   npm run dev
+   npm start
    ```
+5. **Frontend**: point `VITE_API_BASE_URL` at the backend and run `npm run dev`.
 
-   Set the webhook URLs in `backend/.env` to your own n8n endpoints.
+### Backend environment
 
-2. In a second terminal, configure the frontend API URL in the repository root:
+| Variable | Purpose |
+|---|---|
+| `N8N_WEBHOOK_URL` | `hotel-chat` production webhook |
+| `N8N_ESCALATE_URL` | `hotel-escalate` production webhook |
+| `N8N_INGEST_URL` | `hotel-knowledge-ingest` production webhook |
+| `ENABLE_PDF_INGEST` | `true` lets the upload endpoint extract PDF text and send it to the ingest workflow. Off by default, because anyone who can upload can change what the assistant tells guests. |
 
-   ```bash
-   echo "VITE_API_BASE=http://localhost:4000" > .env.local
-   npm install
-   npm run dev
-   ```
+## Security notes
 
-   Open the local URL printed by Vite.
+- The `n8n/` exports contain no credentials. Never commit `.env` files or API keys.
+- All tables have Row Level Security enabled with no policies, so only the n8n service role can read or write them.
+- Before exposing this publicly, protect the ingest webhook (n8n Header Auth) and keep `ENABLE_PDF_INGEST=false` unless uploads are authenticated.
+- Supabase free projects pause after about a week of inactivity; restore the project before a demo.
 
-## Current status and limitations
+## Roadmap
 
-This is a working prototype. Before using it with real guests or exposing it publicly, protect the admin upload and stats endpoints with authentication, add persistent storage, and test the full flow with secured n8n credentials. The current backend keeps session data and the uploaded guide in memory, and the repository does not yet include an automated test suite.
-
-Do not commit `.env` files or real webhook credentials. Use `backend/.env.example` as a template and keep deployment secrets in the hosting provider's environment settings.
+Staff dashboard for open escalations, unanswered-question analytics from `hotel_chat_logs`, authenticated knowledge management, and multi-property support.
